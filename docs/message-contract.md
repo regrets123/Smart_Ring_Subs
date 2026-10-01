@@ -1,29 +1,27 @@
 # MQTT message contract: first draft
 
 This is the proposed boundary between the ESP32 gateway and the Raspberry Pi
-subscriber. It is a design draft, not yet implemented by either program. The
-real COLMI R09 measurement fields and record identity must be checked against
-the ring when it arrives.
+subscriber. Both programs now handle the simulated envelope below. The real
+COLMI R09 measurement fields and record identity must be checked against the
+ring when it arrives.
 
 ## What exists today
 
-The gateway publishes a temporary mock JSON object to `gateway/mock/readings`:
+The gateway publishes the envelope shown below to `gateway/mock/readings` with
+a simulated heart-rate value. It is a pipeline test, not a decoded ring reading.
+The gateway currently reuses the same `recordId` and `observedAt` for every
+publish, so repeated publishes intentionally represent one logical record.
+Its topic is configurable.
 
-```json
-{"deviceId":"ring-01","gatewayId":"gateway-01","userId":"user-01","reading":42}
-```
-
-It uses MQTT QoS 1 and does not retain the message. This payload has no stable
-record ID, timestamp, or schema version. It can test connectivity and parsing,
-but it cannot prove that repeated deliveries or repeated ring syncs will produce
-only one stored measurement.
+It uses MQTT QoS 1 and does not retain the message. The gateway does not yet
+have a durable offline queue or a SQLite commit-acknowledgement subscription.
 
 ## Proposed first real envelope
 
 Publish one *logical record* per MQTT message, even if a ring sync sends many
 messages in a burst. A logical record may itself contain several values, such as
-a sleep interval. This example uses a **provisional heart-rate record**; the
-gateway does not publish this format yet:
+a sleep interval. This example is the gateway's current **simulated**
+heart-rate payload. Its shape remains provisional for real readings:
 
 ```json
 {
@@ -82,9 +80,9 @@ Scores such as recovery are application-derived values, not raw ring readings.
 
 ## Duplicate and failure rule
 
-The database will enforce uniqueness on `(deviceId, recordId)`. The subscriber
-will validate the message and commit the original payload plus its metadata in
-one SQLite transaction. A repeated delivery of the same logical record will
+The database enforces uniqueness on `(deviceId, recordId)`. The subscriber
+validates the simulated envelope and commits the original payload plus its
+metadata in one SQLite transaction. A repeated delivery of the same record will
 leave one stored record. A collision where the same identity carries different
 content is an error to investigate, not an update to apply silently.
 
@@ -119,11 +117,11 @@ unsaved data. Flash wear and power loss during writes also need tests.
 ## Validation and security boundaries
 
 - Accept only the configured topic and supported `schemaVersion` values.
-- Set a message-size limit before JSON decoding; choose the limit after
-  measuring real sync output.
-- Validate required fields and types, then check the allowed
-  `deviceId`/`gatewayId`/`userId` relationship. Claimed IDs in JSON are not proof
-  of authorization.
+- The subscriber currently enforces a provisional 64 KiB limit before JSON
+  decoding. Revisit it after measuring real sync output.
+- The subscriber validates envelope field types and the simulated `data.bpm`.
+  Checking the allowed `deviceId`/`gatewayId`/`userId` relationship remains
+  deployment work. Claimed IDs in JSON are not proof of authorization.
 - Keep broker credentials outside the repository. Give the subscriber account
   subscribe access only to the required data topic and publish access only to
   the gateway's acknowledgement topic. Restrict access to the SQLite file.
