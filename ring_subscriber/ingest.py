@@ -38,8 +38,67 @@ def _utc_timestamp(value: object) -> bool:
     return offset is not None and offset.total_seconds() == 0
 
 
+def _integer_in_range(value: object, minimum: int, maximum: int) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def _valid_data(kind: str, data: dict) -> bool:
+    if kind == "heartRate":
+        return set(data) == {"bpm"} and _integer_in_range(data["bpm"], 1, 255)
+    if kind == "heartRateHistory":
+        return (
+            set(data) == {"utc_time", "range", "samples"}
+            and _integer_in_range(data["utc_time"], 0, 0xFFFFFFFF)
+            and _integer_in_range(data["range"], 0, 255)
+            and isinstance(data["samples"], list)
+            and bool(data["samples"])
+            and all(_integer_in_range(sample, 0, 255) for sample in data["samples"])
+        )
+    if kind == "spo2":
+        return set(data) == {"o2Perc"} and _integer_in_range(data["o2Perc"], 1, 100)
+    if kind == "spo2History":
+        return (
+            set(data) == {"unknown", "days_ago", "samples"}
+            and _integer_in_range(data["unknown"], 0, 255)
+            and _integer_in_range(data["days_ago"], 0, 255)
+            and isinstance(data["samples"], list)
+            and bool(data["samples"])
+            and all(
+                isinstance(sample, dict)
+                and set(sample) == {"min", "max"}
+                and _integer_in_range(sample["min"], 0, 255)
+                and _integer_in_range(sample["max"], 0, 255)
+                for sample in data["samples"]
+            )
+        )
+    if kind == "sleep":
+        return (
+            set(data) == {"nights"}
+            and isinstance(data["nights"], list)
+            and bool(data["nights"])
+            and all(
+                isinstance(night, dict)
+                and set(night) == {"days_ago", "start_min", "end_min", "stages"}
+                and _integer_in_range(night["days_ago"], 0, 255)
+                and _integer_in_range(night["start_min"], -32768, 32767)
+                and _integer_in_range(night["end_min"], -32768, 32767)
+                and isinstance(night["stages"], list)
+                and bool(night["stages"])
+                and all(
+                    isinstance(stage, dict)
+                    and set(stage) == {"stage", "duration_min"}
+                    and stage["stage"] in ("light", "deep", "awake")
+                    and _integer_in_range(stage["duration_min"], 0, 255)
+                    for stage in night["stages"]
+                )
+                for night in data["nights"]
+            )
+        )
+    return False
+
+
 def parse_message(payload: bytes) -> dict:
-    """Check the envelope only; ring measurement fields remain provisional."""
+    """Validate the gateway envelope and its currently published reading kinds."""
     if len(payload) > MAX_MESSAGE_BYTES:
         raise InvalidMessage("message exceeds the 64 KiB limit")
     try:
@@ -55,14 +114,16 @@ def parse_message(payload: bytes) -> dict:
         value = message.get(name)
         if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
             raise InvalidMessage(f"invalid {name}")
-    if message.get("kind") != "heartRate":
-        raise InvalidMessage("only the simulated heartRate kind is supported")
+    kind = message.get("kind")
+    if kind not in ("heartRate", "heartRateHistory", "spo2", "spo2History", "sleep"):
+        raise InvalidMessage("unsupported reading kind")
     if not _utc_timestamp(message.get("observedAt")):
         raise InvalidMessage("observedAt must be a UTC ISO 8601 timestamp")
-    if not isinstance(message.get("data"), dict):
+    data = message.get("data")
+    if not isinstance(data, dict):
         raise InvalidMessage("data must be an object")
-    if set(message["data"]) != {"bpm"} or type(message["data"]["bpm"]) is not int:
-        raise InvalidMessage("simulated heartRate data must contain an integer bpm")
+    if not _valid_data(kind, data):
+        raise InvalidMessage(f"invalid {kind} data")
     return message
 
 

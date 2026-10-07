@@ -14,7 +14,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Save smart-ring MQTT records to SQLite")
     parser.add_argument("--host", default=os.getenv("SMART_RING_MQTT_HOST"))
     parser.add_argument("--port", type=int, default=8883)
-    parser.add_argument("--topic", default="gateway/mock/readings")
+    parser.add_argument("--topic", default="gateway/live/readings")
     parser.add_argument("--database", default="data/ring.sqlite3")
     parser.add_argument("--ca-cert", default=os.getenv("SMART_RING_MQTT_CA_CERT"))
     args = parser.parse_args()
