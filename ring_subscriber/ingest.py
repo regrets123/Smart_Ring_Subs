@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 
 
 MAX_MESSAGE_BYTES = 64 * 1024  # Initial guard; revisit after measuring real syncs.
-ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+LIVE_ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+HISTORICAL_ID_PATTERN = re.compile(r"[0-9a-f]{16}\Z")
+DATABASE_SCHEMA_VERSION = 2
 
 
 class InvalidMessage(ValueError):
@@ -15,7 +17,7 @@ class InvalidMessage(ValueError):
 
 
 class RecordConflict(ValueError):
-    """One record identity was used for two different payloads."""
+    """A record ID was reused for a different identity or live payload."""
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -40,6 +42,13 @@ def _utc_timestamp(value: object) -> bool:
 
 def _integer_in_range(value: object, minimum: int, maximum: int) -> bool:
     return type(value) is int and minimum <= value <= maximum
+
+
+def _valid_record_id(kind: object, value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    pattern = LIVE_ID_PATTERN if kind in ("heartRate", "spo2") else HISTORICAL_ID_PATTERN
+    return pattern.fullmatch(value) is not None
 
 
 def _valid_data(kind: str, data: dict) -> bool:
@@ -136,10 +145,6 @@ def parse_message(payload: bytes) -> dict:
         raise InvalidMessage("top-level JSON must be an object")
     if type(message.get("schemaVersion")) is not int or message["schemaVersion"] != 1:
         raise InvalidMessage("unsupported schemaVersion")
-    for name in ("recordId", "deviceId", "gatewayId", "userId"):
-        value = message.get(name)
-        if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
-            raise InvalidMessage(f"invalid {name}")
     kind = message.get("kind")
     if kind not in (
         "heartRate",
@@ -150,6 +155,15 @@ def parse_message(payload: bytes) -> dict:
         "sleep",
     ):
         raise InvalidMessage("unsupported reading kind")
+    if not _valid_record_id(kind, message.get("recordId")):
+        raise InvalidMessage("invalid recordId for reading kind")
+    for name in ("deviceId", "gatewayId", "userId"):
+        value = message.get(name)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is None
+        ):
+            raise InvalidMessage(f"invalid {name}")
     if not _utc_timestamp(message.get("observedAt")):
         raise InvalidMessage("observedAt must be a UTC ISO 8601 timestamp")
     data = message.get("data")
@@ -162,44 +176,106 @@ def parse_message(payload: bytes) -> dict:
 
 def open_database(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
-    connection.execute(
-        """CREATE TABLE IF NOT EXISTS received_messages (
-            device_id TEXT NOT NULL,
-            record_id TEXT NOT NULL,
-            gateway_id TEXT NOT NULL,
-            user_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            observed_at TEXT NOT NULL,
-            received_at TEXT NOT NULL,
-            raw_payload BLOB NOT NULL,
-            PRIMARY KEY (device_id, record_id)
-        )"""
-    )
-    connection.commit()
-    return connection
+    try:
+        schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'received_messages'"
+        ).fetchone() is not None
+        if schema_version not in (0, DATABASE_SCHEMA_VERSION) or (
+            schema_version == 0 and table_exists
+        ):
+            raise RuntimeError(
+                "Database schema is incompatible; stop the subscriber and reset "
+                "the prototype database manually before restarting."
+            )
+
+        with connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS received_messages (
+                    record_id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL,
+                    gateway_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    raw_payload BLOB NOT NULL
+                )"""
+            )
+            columns = connection.execute(
+                "PRAGMA table_info(received_messages)"
+            ).fetchall()
+            column_names = {column[1] for column in columns}
+            primary_key_columns = [
+                column[1] for column in sorted(columns, key=lambda column: column[5])
+                if column[5]
+            ]
+            if column_names != {
+                "record_id",
+                "device_id",
+                "gateway_id",
+                "user_id",
+                "kind",
+                "observed_at",
+                "received_at",
+                "raw_payload",
+            } or primary_key_columns != ["record_id"]:
+                raise RuntimeError(
+                    "Database schema is incompatible; stop the subscriber and reset "
+                    "the prototype database manually before restarting."
+                )
+            connection.execute(f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}")
+        return connection
+    except Exception:
+        connection.close()
+        raise
 
 
 def store_message(connection: sqlite3.Connection, payload: bytes) -> str:
-    """Return 'stored' or 'duplicate'; reject conflicting uses of an ID."""
+    """Return 'stored', 'updated', or 'duplicate'; reject identity conflicts."""
     message = parse_message(payload)
-    key = (message["deviceId"], message["recordId"])
+    record_id = message["recordId"]
     received_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
     with connection:  # Commit on success; roll back if an operation fails.
         row = connection.execute(
-            "SELECT raw_payload FROM received_messages WHERE device_id = ? AND record_id = ?",
-            key,
+            """SELECT device_id, gateway_id, user_id, kind, raw_payload
+               FROM received_messages WHERE record_id = ?""",
+            (record_id,),
         ).fetchone()
         if row is not None:
-            if row[0] != payload:
+            if row[:4] != (
+                message["deviceId"],
+                message["gatewayId"],
+                message["userId"],
+                message["kind"],
+            ):
                 raise RecordConflict("record ID reused with different content")
-            return "duplicate"
+            if row[4] == payload:
+                return "duplicate"
+            if message["kind"] not in ("heartRate", "spo2"):
+                connection.execute(
+                    """UPDATE received_messages
+                       SET observed_at = ?, received_at = ?, raw_payload = ?
+                       WHERE record_id = ?""",
+                    (message["observedAt"], received_at, payload, record_id),
+                )
+                return "updated"
+            raise RecordConflict("record ID reused with different content")
         connection.execute(
             """INSERT INTO received_messages
                (device_id, record_id, gateway_id, user_id, kind,
                 observed_at, received_at, raw_payload)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (*key, message["gatewayId"], message["userId"], message["kind"],
-             message["observedAt"], received_at, payload),
+            (
+                message["deviceId"],
+                record_id,
+                message["gatewayId"],
+                message["userId"],
+                message["kind"],
+                message["observedAt"],
+                received_at,
+                payload,
+            ),
         )
     return "stored"

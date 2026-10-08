@@ -26,7 +26,7 @@ heart-rate payload. Its shape remains provisional for real readings:
 ```json
 {
   "schemaVersion": 1,
-  "recordId": "example-stable-record-id-001",
+  "recordId": "00000000000000000000000000000001",
   "deviceId": "ring-01",
   "gatewayId": "gateway-01",
   "userId": "user-01",
@@ -38,6 +38,11 @@ heart-rate payload. Its shape remains provisional for real readings:
 
 `recordId` here is illustrative. Its real derivation must keep the same ID for
 the same ring record across later syncs, even after a gateway restart.
+Live `heartRate` and `spo2` records use 32 lowercase hexadecimal characters;
+historical records use 16. The subscriber enforces these lengths and makes
+`recordId` globally unique. A changed historical record with the same identity
+replaces its previously stored payload so later syncs can refresh that day's
+data; a changed live record remains a conflict.
 
 | Field | Meaning |
 | --- | --- |
@@ -70,7 +75,7 @@ rules, and sample grouping should be checked against captures from our ring.
 | `spo2` | Blood oxygen percentage and its measurement time. | [Daybreak's R09 implementation](https://github.com/reuhenbhalod/DayBreak) describes a streaming SpO2 assembler and background readings. Exact record fields and cadence still need captures. |
 | `activity` | Step count; possibly distance and calories over a time interval. | The [R02-family SQLite schema](https://github.com/tahnok/colmi_r02_client/blob/main/tests/database_schema.sql) stores steps, distance, calories, and timestamp together. Units and whether these are interval or cumulative values need verification. |
 | `sleep` | A session or segment with start/end times and sleep stages. | [Daybreak](https://github.com/reuhenbhalod/DayBreak) describes multi-packet sleep reassembly and stages; its README names wake, light, deep, and REM. The structure, stage codes, and accuracy need verification. |
-| `hrvHistory` | `metric: "hrv_composite_ms"`, `interval_minutes`, optional `probe_midnight_utc`, and nonempty `samples` with `days_ago`, `slot`, and `value_ms`. | The gateway publishes this decoded history. `value_ms` is a firmware-computed composite, not a validated RMSSD measurement; the packet does not contain absolute timestamps or a timezone. |
+| `hrvHistory` | `metric: "hrv_composite_ms"`, `interval_minutes`, optional `probe_midnight_utc`, and nonempty `samples` with `days_ago`, `slot`, and `value_ms`. | The gateway publishes this decoded history using a stable 16-character historical `recordId`. `value_ms` is a firmware-computed composite, not a validated RMSSD measurement; the packet does not contain absolute timestamps or a timezone. |
 | `battery` | Battery level and capture time, as device status rather than a health measurement. | The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring) exposes ring battery information. We need to check what our R09 returns. |
 
 The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring)
@@ -82,12 +87,16 @@ Scores such as recovery are application-derived values, not raw ring readings.
 
 ## Duplicate and failure rule
 
-The database enforces uniqueness on `(deviceId, recordId)`. The subscriber
+The database enforces uniqueness on `recordId`. The subscriber
 validates supported envelope and data shapes, including `hrvHistory`, and
 commits the original payload plus its metadata in one SQLite transaction. A
-repeated delivery of the same record will leave one stored record. A collision
-where the same identity carries different content is an error to investigate,
-not an update to apply silently.
+repeated delivery of an identical record is a no-op. A later historical
+payload with the same record identity updates the existing row; a changed live
+payload or a reused ID with different device/user/kind identity is an error to
+investigate. The subscriber never resets an incompatible database
+automatically: it stops with an error and requires a manual prototype database
+reset. Rows written under the previous composite-key schema cannot be matched
+automatically to the new stable IDs.
 
 An MQTT QoS 1 acknowledgement means delivery through MQTT, not a successful
 SQLite commit. We must test the subscriber's acknowledgement and restart

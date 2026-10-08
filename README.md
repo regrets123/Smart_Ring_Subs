@@ -4,6 +4,14 @@ Python service that subscribes to the gateway's MQTT test topic and stores each
 validated message's original bytes and receipt time in SQLite. It validates
 heart-rate, HRV history, SpO2, and sleep record shapes without interpreting
 the measurements. See the [message contract](docs/message-contract.md).
+Historical record IDs must be 16 lowercase hexadecimal characters; live
+heart-rate and SpO2 record IDs must be 32. Repeated historical records update
+the stored payload for that ID, while changed live records are rejected.
+
+The prototype database schema now uses `record_id` as its unique key. The
+subscriber never discards an existing database automatically. If it detects
+the old schema, it stops with an error; stop the service and reset the
+prototype database manually before restarting.
 
 ## Run locally or on the Pi
 
