@@ -1,9 +1,9 @@
 # Smart Ring Subscriber
 
 Python service that subscribes to the gateway's MQTT test topic and stores each
-validated message's original bytes and receipt time in SQLite. See the
-[message contract](docs/message-contract.md) for the provisional envelope.
-No physiological measurement parser is implemented yet.
+validated message's original bytes and receipt time in SQLite. It validates
+heart-rate, HRV history, SpO2, and sleep record shapes without interpreting
+the measurements. See the [message contract](docs/message-contract.md).
 
 ## Run locally or on the Pi
 

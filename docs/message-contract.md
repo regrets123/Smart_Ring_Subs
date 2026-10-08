@@ -1,9 +1,9 @@
 # MQTT message contract: first draft
 
-This is the proposed boundary between the ESP32 gateway and the Raspberry Pi
-subscriber. Both programs now handle the simulated envelope below. The real
-COLMI R09 measurement fields and record identity must be checked against the
-ring when it arrives.
+This is the boundary between the ESP32 gateway and the Raspberry Pi subscriber.
+Both programs handle the simulated envelope below, and the gateway also
+publishes decoded records including HRV history. The real COLMI R09 measurement
+fields and record identity must still be checked against the ring.
 
 ## What exists today
 
@@ -56,13 +56,13 @@ Whether every real record has a trustworthy `observedAt` is still unverified.
 If it does not, the field may be `null` in the eventual contract; the parser
 must not invent a measurement time from the arrival time.
 
-## Candidate records from the reference projects
+## Published and candidate records
 
-These are **candidate `kind` values and fields**, not a claim that our R09
-firmware exposes every one or that its bytes have already been decoded. The
-gateway will parse BLE data and publish readable JSON; the Pi will validate
-that JSON. We will settle exact names, types, units, timestamp rules, and
-sample grouping from captures of our own ring.
+The gateway currently publishes decoded heart-rate, HRV, SpO2, and sleep
+records. Other rows are **candidate `kind` values and fields**, not a claim that
+our R09 firmware exposes every one or that its bytes have already been decoded.
+The Pi validates supported JSON shapes; exact names, types, units, timestamp
+rules, and sample grouping should be checked against captures from our ring.
 
 | Candidate `kind` | Likely `data` | Evidence and remaining uncertainty |
 | --- | --- | --- |
@@ -70,21 +70,24 @@ sample grouping from captures of our own ring.
 | `spo2` | Blood oxygen percentage and its measurement time. | [Daybreak's R09 implementation](https://github.com/reuhenbhalod/DayBreak) describes a streaming SpO2 assembler and background readings. Exact record fields and cadence still need captures. |
 | `activity` | Step count; possibly distance and calories over a time interval. | The [R02-family SQLite schema](https://github.com/tahnok/colmi_r02_client/blob/main/tests/database_schema.sql) stores steps, distance, calories, and timestamp together. Units and whether these are interval or cumulative values need verification. |
 | `sleep` | A session or segment with start/end times and sleep stages. | [Daybreak](https://github.com/reuhenbhalod/DayBreak) describes multi-packet sleep reassembly and stages; its README names wake, light, deep, and REM. The structure, stage codes, and accuracy need verification. |
+| `hrvHistory` | `metric: "hrv_composite_ms"`, `interval_minutes`, optional `probe_midnight_utc`, and nonempty `samples` with `days_ago`, `slot`, and `value_ms`. | The gateway publishes this decoded history. `value_ms` is a firmware-computed composite, not a validated RMSSD measurement; the packet does not contain absolute timestamps or a timezone. |
 | `battery` | Battery level and capture time, as device status rather than a health measurement. | The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring) exposes ring battery information. We need to check what our R09 returns. |
 
 The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring)
 also lists a stress measurement, while [Daybreak's R09 capability notes](https://github.com/reuhenbhalod/DayBreak/blob/main/Daybreak_PRD.md)
-say HRV depends on firmware and body temperature is not reliable. We will
-keep stress and HRV exploratory and will not define temperature records now.
+say HRV depends on firmware and body temperature is not reliable. HRV history
+is supported by this gateway's firmware, but is still firmware-dependent.
+Stress remains exploratory and we will not define temperature records now.
 Scores such as recovery are application-derived values, not raw ring readings.
 
 ## Duplicate and failure rule
 
 The database enforces uniqueness on `(deviceId, recordId)`. The subscriber
-validates the simulated envelope and commits the original payload plus its
-metadata in one SQLite transaction. A repeated delivery of the same record will
-leave one stored record. A collision where the same identity carries different
-content is an error to investigate, not an update to apply silently.
+validates supported envelope and data shapes, including `hrvHistory`, and
+commits the original payload plus its metadata in one SQLite transaction. A
+repeated delivery of the same record will leave one stored record. A collision
+where the same identity carries different content is an error to investigate,
+not an update to apply silently.
 
 An MQTT QoS 1 acknowledgement means delivery through MQTT, not a successful
 SQLite commit. We must test the subscriber's acknowledgement and restart
@@ -119,7 +122,9 @@ unsaved data. Flash wear and power loss during writes also need tests.
 - Accept only the configured topic and supported `schemaVersion` values.
 - The subscriber currently enforces a provisional 64 KiB limit before JSON
   decoding. Revisit it after measuring real sync output.
-- The subscriber validates envelope field types and the simulated `data.bpm`.
+- The subscriber validates envelope field types and supported data shapes,
+  including the gateway's `hrvHistory` metric, interval, timestamp anchor, and
+  samples.
   Checking the allowed `deviceId`/`gatewayId`/`userId` relationship remains
   deployment work. Claimed IDs in JSON are not proof of authorization.
 - Keep broker credentials outside the repository. Give the subscriber account

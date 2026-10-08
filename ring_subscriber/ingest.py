@@ -54,6 +54,32 @@ def _valid_data(kind: str, data: dict) -> bool:
             and bool(data["samples"])
             and all(_integer_in_range(sample, 0, 255) for sample in data["samples"])
         )
+    if kind == "hrvHistory":
+        if set(data) not in (
+            {"metric", "interval_minutes", "samples"},
+            {"metric", "interval_minutes", "probe_midnight_utc", "samples"},
+        ):
+            return False
+        interval = data["interval_minutes"]
+        return (
+            data["metric"] == "hrv_composite_ms"
+            and _integer_in_range(interval, 1, 255)
+            and (
+                "probe_midnight_utc" not in data
+                or _integer_in_range(data["probe_midnight_utc"], 0, 0xFFFFFFFF)
+            )
+            and isinstance(data["samples"], list)
+            and bool(data["samples"])
+            and all(
+                isinstance(sample, dict)
+                and set(sample) == {"days_ago", "slot", "value_ms"}
+                and _integer_in_range(sample["days_ago"], 0, 255)
+                and _integer_in_range(sample["slot"], 0, 0xFFFF)
+                and sample["slot"] < 1440 // interval
+                and _integer_in_range(sample["value_ms"], 1, 254)
+                for sample in data["samples"]
+            )
+        )
     if kind == "spo2":
         return set(data) == {"o2Perc"} and _integer_in_range(data["o2Perc"], 1, 100)
     if kind == "spo2History":
@@ -115,7 +141,14 @@ def parse_message(payload: bytes) -> dict:
         if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
             raise InvalidMessage(f"invalid {name}")
     kind = message.get("kind")
-    if kind not in ("heartRate", "heartRateHistory", "spo2", "spo2History", "sleep"):
+    if kind not in (
+        "heartRate",
+        "heartRateHistory",
+        "hrvHistory",
+        "spo2",
+        "spo2History",
+        "sleep",
+    ):
         raise InvalidMessage("unsupported reading kind")
     if not _utc_timestamp(message.get("observedAt")):
         raise InvalidMessage("observedAt must be a UTC ISO 8601 timestamp")
