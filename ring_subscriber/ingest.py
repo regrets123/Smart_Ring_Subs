@@ -44,6 +44,13 @@ def _integer_in_range(value: object, minimum: int, maximum: int) -> bool:
     return type(value) is int and minimum <= value <= maximum
 
 
+def _valid_clock_time(value: object) -> bool:
+    if not isinstance(value, str) or re.fullmatch(r"\d{2}:\d{2}", value) is None:
+        return False
+    hour, minute = (int(part) for part in value.split(":"))
+    return hour < 24 and minute < 60
+
+
 def _valid_record_id(kind: object, value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -93,16 +100,17 @@ def _valid_data(kind: str, data: dict) -> bool:
         return set(data) == {"o2Perc"} and _integer_in_range(data["o2Perc"], 1, 100)
     if kind == "spo2History":
         return (
-            set(data) == {"unknown", "days_ago", "samples"}
-            and _integer_in_range(data["unknown"], 0, 255)
+            set(data) == {"days_ago", "samples"}
             and _integer_in_range(data["days_ago"], 0, 255)
             and isinstance(data["samples"], list)
             and bool(data["samples"])
             and all(
                 isinstance(sample, dict)
-                and set(sample) == {"min", "max"}
+                and set(sample) == {"slot", "min", "max"}
+                and _integer_in_range(sample["slot"], 0, 23)
                 and _integer_in_range(sample["min"], 0, 255)
                 and _integer_in_range(sample["max"], 0, 255)
+                and sample["min"] <= sample["max"]
                 for sample in data["samples"]
             )
         )
@@ -113,16 +121,16 @@ def _valid_data(kind: str, data: dict) -> bool:
             and bool(data["nights"])
             and all(
                 isinstance(night, dict)
-                and set(night) == {"days_ago", "start_min", "end_min", "stages"}
+                and set(night) == {"days_ago", "start_time", "end_time", "stages"}
                 and _integer_in_range(night["days_ago"], 0, 255)
-                and _integer_in_range(night["start_min"], -32768, 32767)
-                and _integer_in_range(night["end_min"], -32768, 32767)
+                and _valid_clock_time(night["start_time"])
+                and _valid_clock_time(night["end_time"])
                 and isinstance(night["stages"], list)
                 and bool(night["stages"])
                 and all(
                     isinstance(stage, dict)
                     and set(stage) == {"stage", "duration_min"}
-                    and stage["stage"] in ("light", "deep", "awake")
+                    and stage["stage"] in ("light", "deep", "rem", "awake")
                     and _integer_in_range(stage["duration_min"], 0, 255)
                     for stage in night["stages"]
                 )

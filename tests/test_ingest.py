@@ -31,6 +31,27 @@ HRV_PAYLOAD = (
     b'{"days_ago":1,"slot":20,"value_ms":45}]}}'
 )
 
+SLEEP_PAYLOAD = (
+    b'{"schemaVersion":1,"recordId":"41615c40972cc3df",'
+    b'"deviceId":"ring-01","gatewayId":"gateway-01","userId":"user-01",'
+    b'"kind":"sleep","observedAt":"2026-10-07T12:00:04Z",'
+    b'"data":{"nights":[{"days_ago":1,"start_time":"23:00",'
+    b'"end_time":"07:00","stages":['
+    b'{"stage":"light","duration_min":180},'
+    b'{"stage":"deep","duration_min":180},'
+    b'{"stage":"rem","duration_min":60},'
+    b'{"stage":"awake","duration_min":60}]}]}}'
+)
+
+SPO2_HISTORY_PAYLOAD = (
+    b'{"schemaVersion":1,"recordId":"42e062e1a35a9bce",'
+    b'"deviceId":"ring-01","gatewayId":"gateway-01","userId":"user-01",'
+    b'"kind":"spo2History","observedAt":"2026-10-08T12:00:03Z",'
+    b'"data":{"days_ago":2,"samples":['
+    b'{"slot":0,"min":99,"max":99},'
+    b'{"slot":12,"min":99,"max":99}]}}'
+)
+
 
 class IngestTests(unittest.TestCase):
     def setUp(self):
@@ -54,6 +75,22 @@ class IngestTests(unittest.TestCase):
             "SELECT kind, raw_payload FROM received_messages"
         ).fetchone()
         self.assertEqual(row, ("hrvHistory", HRV_PAYLOAD))
+
+    def test_stores_updated_sleep_payload(self):
+        self.assertEqual(store_message(self.connection, SLEEP_PAYLOAD), "stored")
+
+    def test_stores_updated_spo2_history_payload(self):
+        self.assertEqual(store_message(self.connection, SPO2_HISTORY_PAYLOAD), "stored")
+
+    def test_rejects_invalid_sleep_times_and_spo2_history_samples(self):
+        invalid_sleep = json.loads(SLEEP_PAYLOAD)
+        invalid_sleep["data"]["nights"][0]["start_time"] = "24:00"
+        invalid_spo2 = json.loads(SPO2_HISTORY_PAYLOAD)
+        invalid_spo2["data"]["samples"][0]["slot"] = 24
+        for message in (invalid_sleep, invalid_spo2):
+            with self.subTest(kind=message["kind"]):
+                with self.assertRaises(InvalidMessage):
+                    store_message(self.connection, json.dumps(message).encode())
 
     def test_stores_hrv_history_without_optional_date_anchor(self):
         message = json.loads(HRV_PAYLOAD)
