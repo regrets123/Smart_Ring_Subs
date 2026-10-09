@@ -11,9 +11,7 @@ inside a `readings` entry with a separate `receivedAt` timestamp.
 - MQTT over TLS, QoS 1, no retained messages. The gateway waits for a broker
   acknowledgement; the subscriber acknowledges a valid message after its
   SQLite transaction completes.
-- Both programs must use the **same topic**. Their source defaults currently
-  differ: the gateway defaults to `gateway/readings`, while the subscriber
-  defaults to `gateway/live/readings`.
+- Both programs default to `gateway/readings`; configure the same topic on each side if changing it.
 - Broker acknowledgement confirms MQTT delivery, not SQLite storage. There is
   no gateway flash queue or database-level acknowledgement, so an outage can
   lose records already read from the ring.
