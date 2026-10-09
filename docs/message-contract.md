@@ -1,27 +1,24 @@
-# MQTT message contract: first draft
+# MQTT message contract
 
-This is the boundary between the ESP32 gateway and the Raspberry Pi subscriber.
-Both programs handle the simulated envelope below, and the gateway also
-publishes decoded records including HRV history. The real COLMI R09 measurement
-fields and record identity must still be checked against the ring.
+This contract joins the [ESP32 gateway](https://github.com/regrets123/Smart_Ring_Gateway)
+to the Raspberry Pi subscriber in this repository. The gateway reads the ring
+over BLE, publishes one JSON record per MQTT message, and the subscriber
+validates and stores it in SQLite. The HTTPS API returns the stored message
+inside a `readings` entry with a separate `receivedAt` timestamp.
 
-## What exists today
+## Transport
 
-The gateway publishes the envelope shown below to `gateway/mock/readings` with
-a simulated heart-rate value. It is a pipeline test, not a decoded ring reading.
-The gateway currently reuses the same `recordId` and `observedAt` for every
-publish, so repeated publishes intentionally represent one logical record.
-Its topic is configurable.
+- MQTT over TLS, QoS 1, no retained messages. The gateway waits for a broker
+  acknowledgement; the subscriber acknowledges a valid message after its
+  SQLite transaction completes.
+- Both programs must use the **same topic**. Their source defaults currently
+  differ: the gateway defaults to `gateway/readings`, while the subscriber
+  defaults to `gateway/live/readings`.
+- Broker acknowledgement confirms MQTT delivery, not SQLite storage. There is
+  no gateway flash queue or database-level acknowledgement, so an outage can
+  lose records already read from the ring.
 
-It uses MQTT QoS 1 and does not retain the message. The gateway does not yet
-have a durable offline queue or a SQLite commit-acknowledgement subscription.
-
-## Proposed first real envelope
-
-Publish one *logical record* per MQTT message, even if a ring sync sends many
-messages in a burst. A logical record may itself contain several values, such as
-a sleep interval. This example is the gateway's current **simulated**
-heart-rate payload. Its shape remains provisional for real readings:
+## Envelope
 
 ```json
 {
@@ -31,128 +28,55 @@ heart-rate payload. Its shape remains provisional for real readings:
   "gatewayId": "gateway-01",
   "userId": "user-01",
   "kind": "heartRate",
-  "observedAt": "2026-10-01T12:00:00Z",
+  "observedAt": "2026-10-09T11:40:50Z",
   "data": {"bpm": 72}
 }
 ```
 
-`recordId` here is illustrative. Its real derivation must keep the same ID for
-the same ring record across later syncs, even after a gateway restart.
-Live `heartRate` and `spo2` records use 32 lowercase hexadecimal characters;
-historical records use 16. The subscriber enforces these lengths and makes
-`recordId` globally unique. A changed historical record with the same identity
-replaces its previously stored payload so later syncs can refresh that day's
-data; a changed live record remains a conflict.
+The values in this example are illustrative. `schemaVersion` must be `1`.
+`deviceId`, `gatewayId`, and `userId` are
+1–64 ASCII letters, digits, `_`, or `-`; they are claims in the payload, not
+proof of authorization. `kind` selects one of the six data shapes below.
+`observedAt` is a UTC ISO 8601 string and currently records the gateway's
+**publish time**, including for history. It is not necessarily the ring's
+measurement time. The Pi adds `receivedAt` when storing the message.
 
-| Field | Meaning |
-| --- | --- |
-| `schemaVersion` | Selects the contract the subscriber must validate. |
-| `recordId` | Identifies the same logical ring record across MQTT redelivery, gateway retries, and later ring syncs. It must not change when that record is resent. |
-| `deviceId` | Identifies the source ring. |
-| `gatewayId` | Identifies the ESP32 that sent the record. |
-| `userId` | Identifies the owner; the subscriber must verify that this device is allowed for this user. |
-| `kind` | Selects the meaning and parser for `data`. Proposed values appear below; `mock` remains only for pipeline tests. |
-| `observedAt` | When the measurement occurred, in UTC, if the ring can supply or support a trustworthy time. |
-| `data` | Measurement fields for this `kind`; real shapes remain open. |
-
-The subscriber adds its own `receivedAt` timestamp. It must not substitute
-`receivedAt` for `observedAt`: a twice-daily sync can deliver old measurements.
-Whether every real record has a trustworthy `observedAt` is still unverified.
-If it does not, the field may be `null` in the eventual contract; the parser
-must not invent a measurement time from the arrival time.
-
-## Published and candidate records
-
-The gateway currently publishes decoded heart-rate, HRV, SpO2, and sleep
-records. Other rows are **candidate `kind` values and fields**, not a claim that
-our R09 firmware exposes every one or that its bytes have already been decoded.
-The Pi validates supported JSON shapes; exact names, types, units, timestamp
-rules, and sample grouping should be checked against captures from our ring.
-
-| Candidate `kind` | Likely `data` | Evidence and remaining uncertainty |
+| `kind` | Required `data` | Notes |
 | --- | --- | --- |
-| `heartRate` | Heart rate in beats per minute; possibly a sequence of timed samples. | The [R02-family client HR parser](https://github.com/patmorli/colmi-r09-smart-ring/blob/main/colmi_r02_client/hr.py) handles logs and a configured interval; its example expands a day into 288 five-minute slots. The interval and treatment of missing slots need verification on our R09. |
-| `spo2` | Blood oxygen percentage and its measurement time. | [Daybreak's R09 implementation](https://github.com/reuhenbhalod/DayBreak) describes a streaming SpO2 assembler and background readings. Exact record fields and cadence still need captures. |
-| `activity` | Step count; possibly distance and calories over a time interval. | The [R02-family SQLite schema](https://github.com/tahnok/colmi_r02_client/blob/main/tests/database_schema.sql) stores steps, distance, calories, and timestamp together. Units and whether these are interval or cumulative values need verification. |
-| `sleep` | Nights with `days_ago`, `start_time` and `end_time` in `HH:MM` format, and stages with `stage` and `duration_min`. Supported stages are `light`, `deep`, `rem`, and `awake`. | The gateway publishes decoded sleep history in this format. [Daybreak](https://github.com/reuhenbhalod/DayBreak) also describes multi-packet sleep reassembly and stages; accuracy still needs verification. |
-| `hrvHistory` | `metric: "hrv_composite_ms"`, `interval_minutes`, optional `probe_midnight_utc`, and nonempty `samples` with `days_ago`, `slot`, and `value_ms`. | The gateway publishes this decoded history using a stable 16-character historical `recordId`. `value_ms` is a firmware-computed composite, not a validated RMSSD measurement; the packet does not contain absolute timestamps or a timezone. |
-| `spo2History` | `days_ago` and nonempty `samples` with hourly `slot`, `min`, and `max`. | The gateway publishes one historical record per day; sample slots range from 0 to 23. |
-| `battery` | Battery level and capture time, as device status rather than a health measurement. | The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring) exposes ring battery information. We need to check what our R09 returns. |
+| `heartRate` | `bpm`: integer 1–255 | Live reading. |
+| `spo2` | `o2Perc`: integer 1–100 | Live reading. |
+| `heartRateHistory` | `utc_time`: unsigned 32-bit integer; `range`: byte; nonempty `samples`: byte array | Samples retain packet order, including trailing padding. |
+| `hrvHistory` | `metric: "hrv_composite_ms"`; `interval_minutes`: 1–255; nonempty `samples` of `{days_ago, slot, value_ms}`; optional `probe_midnight_utc` | `days_ago` is a byte, `slot` is within the day at the given interval, and `value_ms` is 1–254. The metric is a firmware composite, not validated RMSSD. |
+| `spo2History` | `days_ago`: byte; nonempty `samples` of `{slot, min, max}` | One day per message; hourly `slot` 0–23; `min` and `max` are bytes with `min <= max`. |
+| `sleep` | Nonempty `nights` of `{days_ago, start_time, end_time, stages}` | Gateway sends one night per message. Times are `HH:MM`; each nonempty `stages` list contains `{stage, duration_min}`, with stage `light`, `deep`, `rem`, or `awake` and a byte duration. |
 
-The [R02-family client](https://github.com/patmorli/colmi-r09-smart-ring)
-also lists a stress measurement, while [Daybreak's R09 capability notes](https://github.com/reuhenbhalod/DayBreak/blob/main/Daybreak_PRD.md)
-say HRV depends on firmware and body temperature is not reliable. HRV history
-is supported by this gateway's firmware, but is still firmware-dependent.
-Stress remains exploratory and we will not define temperature records now.
-Scores such as recovery are application-derived values, not raw ring readings.
+The subscriber rejects unsupported kinds, duplicate JSON fields, malformed
+values, and payloads over 64 KiB. The exact range checks are in
+[`parse_message`](../ring_subscriber/ingest.py); gateway examples are in
+[`payloadExample.json`](https://github.com/regrets123/Smart_Ring_Gateway/blob/main/main/models/payloadExample.json).
 
-## Duplicate and failure rule
+## Record identity and storage
 
-The database enforces uniqueness on `recordId`. The subscriber
-validates supported envelope and data shapes, including `hrvHistory`, and
-commits the original payload plus its metadata in one SQLite transaction. A
-repeated delivery of an identical record is a no-op. A later historical
-payload with the same record identity updates the existing row; a changed live
-payload or a reused ID with different device/user/kind identity is an error to
-investigate. The subscriber never resets an incompatible database
-automatically: it stops with an error and requires a manual prototype database
-reset. Rows written under the previous composite-key schema cannot be matched
-automatically to the new stable IDs.
+Live `heartRate` and `spo2` messages use 32 lowercase hexadecimal characters
+for `recordId`. Historical messages use 16. The gateway derives historical
+IDs from device, kind, and measurement day, so a later sync can update the
+same day's record. Ring history often supplies day offsets or clock times
+rather than an independently verified absolute timestamp; the gateway uses its
+probe date to anchor these records.
 
-An MQTT QoS 1 acknowledgement means delivery through MQTT, not a successful
-SQLite commit. We must test the subscriber's acknowledgement and restart
-behavior before relying on it for storage guarantees.
+SQLite makes `recordId` globally unique. An identical retry is a no-op. A
+changed historical payload with the same device, gateway, user, and kind
+replaces the stored payload; a changed live payload or a reused ID with a
+different identity is rejected. Invalid or conflicting MQTT messages are
+logged and acknowledged to avoid endless replay. On a database failure, the
+subscriber disconnects without acknowledging the message.
 
-## Gateway offline storage target
+## Current limits
 
-Goal: `gateway-01` should retain **a few days of records it has already read
-from the ring** during Wi-Fi, broker, or Pi failure. This does not protect
-readings that remain only on the ring when BLE sync itself fails.
-
-The ESP32 needs a persistent, bounded queue in flash. For each record, it
-stores the exact MQTT payload and stable `recordId` before attempting delivery.
-After a restart or reconnection it retries queued records in order. The Pi
-subscriber should publish an application-level acknowledgement containing the
-record identity only after its SQLite transaction commits; an identical
-duplicate may be acknowledged again. The gateway removes a queued record only
-after matching that acknowledgement. A lost acknowledgement causes a resend,
-which SQLite's uniqueness rule makes safe. Broker QoS 1 acknowledgement alone
-must not cause queue removal.
-
-The current gateway does **not** implement this queue or a database
-acknowledgement topic. Its ESP32-C3 board reports 4 MB of total flash, shared
-with firmware and other partitions. We cannot promise a number of offline days
-until we choose a flash partition, measure real payload sizes and daily record
-counts, and test flash writes/reboots. The queue must report when it is near
-capacity and define an explicit full-queue policy rather than silently erase
-unsaved data. Flash wear and power loss during writes also need tests.
-
-## Validation and security boundaries
-
-- Accept only the configured topic and supported `schemaVersion` values.
-- The subscriber currently enforces a provisional 64 KiB limit before JSON
-  decoding. Revisit it after measuring real sync output.
-- The subscriber validates envelope field types and supported data shapes,
-  including the gateway's `hrvHistory` metric, interval, timestamp anchor, and
-  samples.
-  Checking the allowed `deviceId`/`gatewayId`/`userId` relationship remains
-  deployment work. Claimed IDs in JSON are not proof of authorization.
-- Keep broker credentials outside the repository. Give the subscriber account
-  subscribe access only to the required data topic and publish access only to
-  the gateway's acknowledgement topic. Restrict access to the SQLite file.
-- Record rejected messages and the reason without writing health data or secrets
-  into routine logs.
-
-## Questions to resolve with hardware
-
-1. Which ring fields provide a stable identity for a record seen in two syncs?
-2. What timestamps does the ring provide, and what timezone or clock behavior
-   do they have?
-3. How large are the largest logical records and complete sync bursts?
-4. Do any record types need multiple MQTT messages because of gateway memory or
-   MQTT packet limits?
-5. How many bytes and flash writes does a normal day of records require, and
-   how many days fit in the gateway's available flash partition?
-
-Cloud backup is a separate storage step. It needs a destination outside the Pi
-and a tested restore procedure; the provider and schedule are still undecided.
+The subscriber validates payload structure but does not yet check that a
+`deviceId` is authorized for the claimed `userId` and `gatewayId`. Credentials
+and certificates stay outside Git; broker account permissions should restrict
+publishing and subscribing to the configured topic. The gateway retries failed
+syncs, but without a durable queue it cannot guarantee delivery through a
+Wi-Fi, broker, or Pi outage. Ring timestamp semantics, packet sizes, and
+retention still need measurement against the physical device.
