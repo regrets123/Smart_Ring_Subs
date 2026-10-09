@@ -25,7 +25,7 @@ dist/
 *.egg
 
 # Local configuration and credentials
-.certs/
+certs/
 .env
 .env.*
 !.env.example
