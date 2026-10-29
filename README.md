@@ -96,8 +96,9 @@ the Pi logs stored, updated, duplicate, and rejected messages.
 The subscriber preserves the original payload, rejects malformed or oversized
 JSON, and treats identical `recordId` retries as duplicates. Historical
 records with the same identity may update; changed live records are rejected.
-The gateway has no durable offline queue or database-level acknowledgement,
-so MQTT broker acknowledgement alone does not guarantee SQLite storage.
+The gateway has no durable offline queue. It waits for a database receipt
+(`gateway/receipts/<gatewayId>`) published after the SQLite commit; see the
+message contract. Broker acknowledgement alone does not guarantee storage.
 The subscriber does not yet authorize the claimed device/user relationship.
 
 The repository contains ingestion unit tests, which can be run manually with:

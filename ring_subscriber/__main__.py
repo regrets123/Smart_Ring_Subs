@@ -7,7 +7,13 @@ from pathlib import Path
 
 from paho.mqtt import client as mqtt
 
-from .ingest import InvalidMessage, RecordConflict, open_database, store_message
+from .ingest import (
+    InvalidMessage,
+    RecordConflict,
+    build_receipt,
+    open_database,
+    store_message,
+)
 
 
 def main() -> None:
@@ -15,6 +21,11 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("SMART_RING_MQTT_HOST"))
     parser.add_argument("--port", type=int, default=8883)
     parser.add_argument("--topic", default="gateway/readings")
+    parser.add_argument(
+        "--receipt-topic",
+        default="gateway/receipts",
+        help="prefix; receipts go to <prefix>/<gatewayId> after the database write",
+    )
     parser.add_argument("--database", default="data/ring.sqlite3")
     parser.add_argument("--ca-cert", default=os.getenv("SMART_RING_MQTT_CA_CERT"))
     args = parser.parse_args()
@@ -52,6 +63,15 @@ def main() -> None:
         else:
             logging.info("Subscribed to %s", args.topic)
 
+    def send_receipt(client, payload, status):
+        receipt = build_receipt(payload, status)
+        if receipt is None:
+            return
+        gateway_id, body = receipt
+        info = client.publish(f"{args.receipt_topic}/{gateway_id}", body, qos=1)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            logging.error("Receipt publish failed: %s", info.rc)
+
     def on_message(client, userdata, message):
         if message.topic != args.topic:
             logging.error("Received message on unexpected topic")
@@ -60,12 +80,14 @@ def main() -> None:
             result = store_message(connection, message.payload)
         except (InvalidMessage, RecordConflict) as exc:
             logging.warning("Rejected message: %s", exc)
+            send_receipt(client, message.payload, "rejected")
         except Exception:
             logging.exception("Database write failed; leaving MQTT message unacknowledged")
             client.disconnect()
             return
         else:
             logging.info("Message %s", result)
+            send_receipt(client, message.payload, result)  # Only after the commit.
         if message.qos >= 1:
             ack_result = client.ack(message.mid, message.qos)
             if ack_result != mqtt.MQTT_ERR_SUCCESS:

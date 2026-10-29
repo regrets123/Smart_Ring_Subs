@@ -182,6 +182,30 @@ def parse_message(payload: bytes) -> dict:
     return message
 
 
+def build_receipt(payload: bytes, status: str) -> tuple[str, bytes] | None:
+    """Return (gatewayId, receipt JSON) for the gateway that sent ``payload``.
+
+    Works on rejected payloads too, so the gateway stops retrying a record the
+    Pi will never accept. Returns None when the sender cannot be identified.
+    """
+    try:
+        message = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(message, dict):
+        return None
+    gateway_id = message.get("gatewayId")
+    record_id = message.get("recordId")
+    if (
+        not isinstance(gateway_id, str)
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", gateway_id) is None
+        or not _valid_record_id(message.get("kind"), record_id)
+    ):
+        return None
+    receipt = {"schemaVersion": 1, "recordId": record_id, "status": status}
+    return gateway_id, json.dumps(receipt, separators=(",", ":")).encode("ascii")
+
+
 def open_database(path: str) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     try:

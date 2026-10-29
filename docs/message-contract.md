@@ -12,9 +12,29 @@ inside a `readings` entry with a separate `receivedAt` timestamp.
   acknowledgement; the subscriber acknowledges a valid message after its
   SQLite transaction completes.
 - Both programs default to `gateway/readings`; configure the same topic on each side if changing it.
-- Broker acknowledgement confirms MQTT delivery, not SQLite storage. There is
-  no gateway flash queue or database-level acknowledgement, so an outage can
-  lose records already read from the ring.
+- Broker acknowledgement confirms MQTT delivery, not SQLite storage. The
+  database receipt below confirms storage. There is no gateway flash queue, so
+  an outage can still lose records already read from the ring.
+
+## Database receipt
+
+After the SQLite transaction commits (or the message is rejected), the
+subscriber publishes a QoS 1 receipt to `gateway/receipts/<gatewayId>`
+(`--receipt-topic` sets the prefix; the gateway's
+`GATEWAY_MQTT_RECEIPT_TOPIC` must match):
+
+```json
+{"schemaVersion": 1, "recordId": "00000000000000000000000000000001", "status": "stored"}
+```
+
+`status` is `stored`, `updated`, `duplicate`, or `rejected`. The gateway counts
+the first three as success and waits up to 10 seconds for a receipt matching
+the `recordId` it just published. A timeout counts as failure; historical
+records are then retried on the next sync, which is safe because they are
+idempotent. A database failure sends no receipt. Messages whose sender or
+`recordId` cannot be read also get none. The broker account needs publish
+rights on `gateway/receipts/#` for the Pi and subscribe rights on
+`gateway/receipts/<gatewayId>` for the gateway.
 
 ## Envelope
 

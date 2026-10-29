@@ -8,6 +8,7 @@ from ring_subscriber.ingest import (
     MAX_MESSAGE_BYTES,
     InvalidMessage,
     RecordConflict,
+    build_receipt,
     open_database,
     store_message,
 )
@@ -190,6 +191,22 @@ class IngestTests(unittest.TestCase):
                     store_message(self.connection, payload)
         count = self.connection.execute("SELECT COUNT(*) FROM received_messages").fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_receipt_names_gateway_record_and_status(self):
+        gateway_id, body = build_receipt(PAYLOAD, "stored")
+        self.assertEqual(gateway_id, "gateway-01")
+        self.assertEqual(
+            json.loads(body),
+            {
+                "schemaVersion": 1,
+                "recordId": "00000000000000000000000000000001",
+                "status": "stored",
+            },
+        )
+
+    def test_receipt_is_omitted_when_sender_cannot_be_identified(self):
+        self.assertIsNone(build_receipt(b"not json", "rejected"))
+        self.assertIsNone(build_receipt(b'{"gatewayId":"a/b","recordId":"x"}', "rejected"))
 
     def test_database_survives_reopen(self):
         store_message(self.connection, PAYLOAD)
